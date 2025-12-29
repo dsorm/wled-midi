@@ -26,6 +26,7 @@ from rtmidi.midiconstants import NOTE_ON, NOTE_OFF, CONTROL_CHANGE
 # Síťová konfigurace
 WLED_IP = "192.168.5.78"  # IP adresa z vašeho zadání
 WLED_PORT = 21324         # Standardní UDP port pro WLED Realtime
+WLED_TIMEOUT = 30         # Timeout v sekundách - jak dlouho WLED zůstane v realtime módu po posledním paketu (max 255)
 
 # Hardwarová konfigurace
 STRIP_LENGTH = 120      # 2 metry * 60 LED/m = 120 LED
@@ -47,6 +48,17 @@ LAST_KEY_LED = 116   # LED index pro poslední klávesu (C8, MIDI nota 108)
 # Vizuální konfigurace
 BASE_COLOR = (255, 0, 0) # Výchozí barva (Červená) - lze změnit např. na (0, 0, 255) pro modrou
 USE_VELOCITY = True      # Pokud True, síla úhozu ovlivní jas LED
+
+# Rozsah velocity (síla úhozu z klaviatury)
+# MIDI hodnoty jsou 0-127. Nastavením rozsahu můžete upravit citlivost:
+MIN_VELOCITY = 10         # Minimální velocity (lehký stisk) - mapuje se na MIN_BRIGHTNESS
+MAX_VELOCITY = 100       # Maximální velocity (silný stisk) - mapuje se na MAX_BRIGHTNESS
+
+# Rozsah jasu LED (jako procenta, 0.0 = vypnuto, 1.0 = plný jas)
+# Například: MIN_BRIGHTNESS=0.2, MAX_BRIGHTNESS=1.0 znamená, že i nejslabší
+# stisk rozsvítí LED na 20% jasu a nejsilnější stisk na 100% jasu
+MIN_BRIGHTNESS = 0.3     # Minimální jas (pro MIN_VELOCITY)
+MAX_BRIGHTNESS = 1.0     # Maximální jas (pro MAX_VELOCITY)
 
 # ==========================================
 # TŘÍDA PRO KOMUNIKACI S WLED
@@ -79,12 +91,12 @@ class WLEDClient:
 
         # Protokol 1: WARLS (WLED Audio Reactive Led Strip)
         # Bajt 0: 1 (Identifikátor WARLS)
-        # Bajt 1: 2 (Timeout v sekundách - udrží WLED v realtime módu 2s po posledním paketu)
+        # Bajt 1: WLED_TIMEOUT (Timeout v sekundách - udrží WLED v realtime módu po posledním paketu)
         # Bajt 2: Index LED (0-255)
         # Bajt 3: Červená (0-255)
         # Bajt 4: Zelená (0-255)
         # Bajt 5: Modrá (0-255)
-        packet = bytearray([1, 2, index, r, g, b])
+        packet = bytearray([1, WLED_TIMEOUT, index, r, g, b])
         
         try:
             self.sock.sendto(packet, (self.ip, self.port))
@@ -210,18 +222,32 @@ class MIDIEngine:
         # Lineární mapování: první klávesa → FIRST_KEY_LED, poslední klávesa → LAST_KEY_LED
         key_position = note - MIDI_OFFSET_START  # 0 pro první klávesu, 87 pro poslední
         led_index = round(FIRST_KEY_LED + key_position * (LAST_KEY_LED - FIRST_KEY_LED) / (PIANO_KEYS - 1))
-        
-        if self.debug:
-            print(f" STISK: MIDI Nota {note} (Velocity {velocity}) -> Mapováno na LED Index {led_index}")
 
         # Výpočet jasu na základě síly úhozu (Velocity)
         if USE_VELOCITY:
-            brightness_factor = velocity / 127.0
+            # Omezit velocity do nastaveného rozsahu
+            velocity_clamped = max(MIN_VELOCITY, min(velocity, MAX_VELOCITY))
+
+            # Normalizovat velocity do rozsahu 0.0-1.0
+            if MAX_VELOCITY > MIN_VELOCITY:
+                velocity_normalized = (velocity_clamped - MIN_VELOCITY) / (MAX_VELOCITY - MIN_VELOCITY)
+            else:
+                velocity_normalized = 1.0
+
+            # Mapovat na rozsah jasu LED
+            brightness_factor = MIN_BRIGHTNESS + velocity_normalized * (MAX_BRIGHTNESS - MIN_BRIGHTNESS)
+
             r = int(BASE_COLOR[0] * brightness_factor)
             g = int(BASE_COLOR[1] * brightness_factor)
             b = int(BASE_COLOR[2] * brightness_factor)
+
+            if self.debug:
+                print(f" STISK: MIDI Nota {note} (Velocity {velocity}) -> LED {led_index} | Jas: {brightness_factor:.2f} ({int(brightness_factor*100)}%)")
         else:
             r, g, b = BASE_COLOR
+
+            if self.debug:
+                print(f" STISK: MIDI Nota {note} (Velocity {velocity}) -> LED {led_index} | Jas: Plný (velocity ignorována)")
 
         # Odeslání do WLED
         self.wled.send_pixel(led_index, r, g, b)
@@ -258,7 +284,7 @@ if __name__ == "__main__":
     if args.debug:
         print("!!! DEBUG REŽIM ZAPNUT!!!")
 
-    print(f"Cílová IP: {WLED_IP}")
+    print(f"Cílová IP: {WLED_IP} | Timeout: {WLED_TIMEOUT}s")
     print(f"Mapování: Nota {MIDI_OFFSET_START} (A0) -> LED {FIRST_KEY_LED} | Nota {MIDI_OFFSET_START + PIANO_KEYS - 1} (C8) -> LED {LAST_KEY_LED}")
     
     # Inicializace WLED Klienta s předáním debug flagu
